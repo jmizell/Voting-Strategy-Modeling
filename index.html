@@ -1,0 +1,475 @@
+<html>
+<head>
+    <title>Voting Strategy Modeling</title>
+    <style>
+        #log {
+            width: 80%;
+            height: 200px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+<div id="log">
+</div>
+<br/>
+<div id="config">
+    <strong>Parties</strong><br />
+    <div id="cfg_parties"></div>
+    <button onclick="addParty('New Party', 0.5)">Add Party</button><br />
+
+    <strong>Offices</strong><br />
+    <div id="cfg_offices"></div>
+    <button onclick="addOffice('New Office')">Add Office</button><br />
+
+    <strong>Voter Strategies</strong><br />
+    <div id="cfg_strategies"></div>
+    <button onclick="addStrategy('New Strategy', '', 0.0, 1.0, 0)">Add Voter Strategy</button><br />
+
+    <label for="cfg_iterations">Iterations</label>
+    <input id="cfg_iterations" name="iterations" type="number" value="1000" min="1" max="50000" step="1">
+    <label for="cfg_gamma">Gamma</label>
+    <input id="cfg_gamma" name="gamma" type="number" value="0.1" min="0.01" max="1.0" step="0.01">
+    <label for="cfg_loss-allowance">Loss Allowance</label>
+    <input id="cfg_loss-allowance" name="loss-allowance" type="number" value="4" min="1" max="50000" step="1">
+    <button onclick="run()">Run</button>
+</div>
+
+<template id="template_party">
+    <div class="cfg_party">
+        <button onclick="this.parentNode.remove()">X</button>
+        <label>Name <input name="cfg_party_name" class="cfg_party_name" type="text" value="Unset"></label>
+        <label>Party Alignment:
+            <input oninput="setOutput(this, '.cfg_party_alignment_output')" type="range" class="cfg_party_alignment" name="cfg_party_alignment" min="0.0" max="1.0" step="0.01" value="0.5">
+            <output class="cfg_party_alignment_output">0.5</output>
+        </label>
+    </div>
+</template>
+
+<template id="template_strategy">
+    <div class="cfg_strategy">
+        <button onclick="this.parentNode.remove()">X</button>
+        <label>Name <input name="cfg_strategy_name" class="cfg_strategy_name" type="text" value=""></label>
+        <label>Party Preference <input name="cfg_party_preference" class="cfg_party_preference" type="text" value=""></label>
+        <label>Voter Count <input name="cfg_party_voter_count" class="cfg_party_voter_count" type="number" value="0" min="0" max="100" step="1"></label>
+        <label>Min Alignment:
+            <input oninput="setOutput(this, '.cfg_strategy_min_alignment_output')" type="range" class="cfg_strategy_min_alignment" name="cfg_strategy_min_alignment" min="0.0" max="1.0" step="0.01" value="0.0">
+            <output class="cfg_strategy_min_alignment_output"></output>
+        </label>
+        <label>Max Alignment:
+            <input oninput="setOutput(this, '.cfg_strategy_max_alignment_output')" type="range" class="cfg_strategy_max_alignment" name="cfg_strategy_max_alignment" min="0.0" max="1.0" step="0.01" value="1.0">
+            <output class="cfg_strategy_max_alignment_output"></output>
+        </label>
+    </div>
+</template>
+
+<template id="template_office">
+    <div class="cfg_office">
+        <button onclick="this.parentNode.remove()">X</button>
+        <label>Name <input name="cfg_office_name" class="cfg_office_name" type="text" value="Unset"></label>
+    </div>
+</template>
+
+<script type='text/javascript'>
+
+    const defaultGamma = 0.1;
+    const defaultLossAllowance = 4;
+
+    class Candidate {
+        losses = 0;
+
+        constructor(party, name, office, alignment) {
+            this.office = office;
+            this.party = party;
+            this.name = name;
+            this.alignment = alignment;
+        }
+    }
+
+    class Party {
+        candidates = {};
+        candidateIndex = 0;
+
+        constructor(name) {
+            this.name = name;
+        }
+
+        removeCandidateByOffice(officeName) {
+            if (officeName in this.candidates) {
+                delete this.candidates[officeName];
+            }
+        }
+
+        initializeCandidateForOffice(officeName, alignment) {
+            this.candidateIndex += 1;
+            let candidateName = this.name + this.candidateIndex;
+            if (officeName in this.candidates) {
+                this.candidates[officeName].alignment = alignment;
+                this.candidates[officeName].losses = 0;
+                this.candidates[officeName].name = candidateName;
+                return
+            }
+
+            this.candidates[officeName] = new Candidate(this.name, candidateName, officeName, alignment);
+        }
+
+        randomInitializeCandidateForOffice(officeName) {
+            this.initializeCandidateForOffice(officeName, Math.random());
+        }
+
+        addCandidate(candidate) {
+            this.candidates[candidate.office] = candidate;
+        }
+
+        adjustCandidates(ballot) {
+            for (let [officeName, office] of Object.entries(ballot.offices)) {
+
+                // We don't need to do anything if we do not have a candidate running for that office
+                if (!(officeName in this.candidates)) {
+                    writeLog(this.name + " did not have a candidate for " + officeName);
+                    continue
+                }
+
+                // If our canidate won, then we leave them alone. Why mess with success?
+                var ourCandidate = this.candidates[officeName]
+                if (office.winner.name === ourCandidate.name) {
+                    writeLog(this.name + " won race for office " + officeName);
+                    continue
+                }
+                ourCandidate.losses += 1;
+
+                if (ourCandidate.losses === defaultLossAllowance) {
+                    writeLog(this.name + " lost race for office " + officeName +
+                        ", candidate loss count is " + ourCandidate.losses + ". Replacing.");
+                    this.randomInitializeCandidateForOffice(officeName);
+                    continue
+                }
+
+                // Calculate the new party alignment by measuring the difference from the winning candidate
+                var newAlignment = ourCandidate.alignment + defaultGamma * (office.winner.alignment - ourCandidate.alignment);
+                if (newAlignment > 1.0) {
+                    newAlignment = 1.0;
+                } else if (newAlignment < 0.0) {
+                    newAlignment = 0.0;
+                }
+                writeLog(this.name + " lost race for office " + officeName +
+                    " winning canidate had alignment value of " + office.winner.alignment);
+                writeLog(this.name + " adjusting " + ourCandidate.name + " alignment from " + ourCandidate.alignment + " to " + newAlignment);
+                ourCandidate.alignment = newAlignment;
+
+            }
+        }
+
+        getElectionLoss(ballot) {
+            let won = 0;
+            for (let [officeName, office] of Object.entries(ballot.offices)) {
+
+                if (!(officeName in this.candidates)) {
+                    continue
+                }
+
+                if (office.winner.name === this.candidates[officeName].name) {
+                    won += 1;
+                }
+            }
+
+            return Object.keys(ballot.offices).length - won
+        }
+    }
+
+    class VotingStrategy {
+        constructor(name, party, politicalAlignmentMin, politicalAlignmentMax) {
+            this.name = name;
+            this.party = party;
+            this.politicalAlignmentMax = politicalAlignmentMax;
+            this.politicalAlignmentMin = politicalAlignmentMin;
+        }
+
+        eval(candidate) {
+            // If we have no party preference, we allways consider the party matched,
+            // if we have a party preference set, then we evaluate if the party matches
+            let matchParty = true;
+            if (this.party !== "") {
+                return this.party === candidate.party;
+            }
+
+            return candidate.alignment >= this.politicalAlignmentMin
+                && candidate.alignment <= this.politicalAlignmentMax
+                && matchParty;
+        }
+    }
+
+    class Voter {
+        constructor(strategy) {
+            this.strategy = strategy;
+        }
+
+        vote(candidate) {
+            return this.strategy.eval(candidate);
+        }
+    }
+
+    class Office {
+        candidates = {};
+        winner = null;
+
+        constructor(name) {
+            this.name = name;
+        }
+
+        addCandidate(candidate) {
+            this.candidates[candidate.name] = candidate
+        }
+
+        resetCandidates() {
+            this.candidates = {};
+        }
+    }
+
+    class Ballot {
+        offices = {};
+        votes = {};
+
+        constructor(name) {
+            this.name = name;
+        }
+
+        addOffice(office) {
+            this.offices[office.name] = office
+        }
+
+        processVotes(voters) {
+            this.votes = {};
+            for (let [officeName, office] of Object.entries(this.offices)) {
+
+                // Evaluate the votes for each voter
+                var officeVotes = {};
+                voters.forEach(function (voter) {
+
+                    // We're going to first detemermine which candidates a voter would choose
+                    var candidatePreferences = [];
+                    for (let [candidateName, candidate] of Object.entries(office.candidates)) {
+                        if (voter.vote(candidate)) {
+                            candidatePreferences.push(candidateName);
+                        }
+                    }
+
+                    // If any candidate is chosen, then we pick a random one from the list.
+                    if (candidatePreferences.length > 0) {
+                        var candidatePreference = candidatePreferences[Math.floor(Math.random() * candidatePreferences.length)];
+                        if (candidatePreference in officeVotes) {
+                            officeVotes[candidatePreference] += 1
+                        } else {
+                            officeVotes[candidatePreference] = 1
+                        }
+                    }
+                });
+
+                // Count the votes for the office.
+                office.winner = null;
+                var mostVotes = 0;
+                for (let [candidate, votes] of Object.entries(officeVotes)) {
+
+                    // We're assuming a simple majority vote wins
+                    if (votes >= mostVotes) {
+
+                        // In the event of a tie, we just assume the result would be random on a recount
+                        if (votes === mostVotes && Math.random() >= 0.5) {
+                            continue
+                        }
+                        office.winner = office.candidates[candidate];
+                        mostVotes = votes;
+                    }
+                }
+
+                this.votes[officeName] = officeVotes;
+            }
+        }
+    }
+
+    class Country {
+        voterStrategies = {};
+        parties = {};
+        offices = {};
+        gamma = defaultGamma;
+        lossAllowance = defaultLossAllowance;
+
+        constructor(name) {
+            this.name = name;
+        }
+
+        setOffice(office) {
+            this.offices[office.name] = office;
+        }
+
+        setParty(party, initialWeight) {
+            this.parties[party.name] = {
+                "initialWeight": initialWeight,
+                "party": party,
+            };
+        }
+
+        setLossAllowance(i) {
+            this.lossAllowance = i;
+        }
+
+        setGamma(i) {
+            this.gamma = i;
+        }
+
+        setVoterStrategy(strategy, count) {
+            this.voterStrategies[strategy.name] = {
+                "count": count,
+                "strategy": strategy,
+            };
+        }
+
+        run(maxIterations) {
+            let generalElectionVoters = [];
+            for (let [name, strategySettings] of Object.entries(this.voterStrategies)) {
+                for (let i = 0; i < strategySettings.count; i++) {
+                    generalElectionVoters.push(new Voter(strategySettings.strategy));
+                }
+            }
+
+            for (let [officeName, office] of Object.entries(this.offices)) {
+                office.resetCandidates();
+                for (let [partyName, partySettings] of Object.entries(this.parties)) {
+                    partySettings.party.removeCandidateByOffice(officeName);
+                    if (partySettings.initialWeight < 0) {
+                        partySettings.party.randomInitializeCandidateForOffice(officeName);
+                    } else {
+                        partySettings.party.initializeCandidateForOffice(officeName, partySettings.initialWeight);
+                    }
+                    office.addCandidate(partySettings.party.candidates[officeName]);
+                }
+            }
+
+            let candidateCount = 0;
+            let candidateAlignmentSum = 0;
+            for (let i = 0; i < maxIterations; i++) {
+
+                candidateCount = 0;
+                candidateAlignmentSum = 0;
+                let generalElectionBallot = new Ballot("General Election " + i);
+                for (let [officeName, office] of Object.entries(this.offices)) {
+                    generalElectionBallot.addOffice(office);
+                }
+
+                writeLog("Running general election " + i);
+                generalElectionBallot.processVotes(generalElectionVoters);
+                writeLog("Votes: " + JSON.stringify(generalElectionBallot.votes));
+                for (let [officeName, office] of Object.entries(generalElectionBallot.offices)) {
+                    writeLog("For the office of " + officeName + " candidate " + office.winner.name + " won the vote.")
+                }
+
+                for (let [partyName, partySettings] of Object.entries(this.parties)) {
+                    partySettings.party.adjustCandidates(generalElectionBallot);
+                    writeLog(partySettings.party.name + " loss " + partySettings.party.getElectionLoss(generalElectionBallot));
+                    for (let [officeName, candidate] of Object.entries(partySettings.party.candidates)) {
+                        candidateCount += 1;
+                        candidateAlignmentSum += candidate.alignment;
+                    }
+                }
+
+                writeLog("Candidate average alignment " + candidateAlignmentSum / candidateCount);
+            }
+
+            candidateCount = 0;
+            candidateAlignmentSum = 0;
+            for (let [partyName, partySettings] of Object.entries(this.parties)) {
+                for (let [officeName, candidate] of Object.entries(partySettings.party.candidates)) {
+                    writeLog("For the office of " + officeName + ", " + partyName + " candidate had final alignment of " + candidate.alignment + ".")
+                    candidateCount += 1;
+                    candidateAlignmentSum += candidate.alignment;
+                }
+            }
+            writeLog("Final average alignment " + candidateAlignmentSum / candidateCount);
+        }
+    }
+
+    let logElement = document.getElementById("log");
+    function writeLog(message) {
+        let newNode = document.createElement('div');
+        newNode.innerHTML = message;
+        logElement.appendChild(newNode);
+    }
+
+    function setOutput(elem, target) {
+        const output = elem.parentNode.querySelector(target);
+        output.textContent = elem.value;
+    }
+
+    function addParty(name, alignment) {
+        let cfg = document.querySelector('#cfg_parties');
+        let template = document.querySelector('#template_party');
+        let clone = template.content.cloneNode(true);
+        clone.querySelector('.cfg_party_name').value = name;
+        clone.querySelector('.cfg_party_alignment').value = alignment;
+        clone.querySelector('.cfg_party_alignment_output').value = alignment;
+        cfg.appendChild(clone);
+    }
+
+    function addStrategy(name, preference, min, max, voterCount) {
+        let cfg = document.querySelector('#cfg_strategies');
+        let template = document.querySelector('#template_strategy');
+        let clone = template.content.cloneNode(true);
+        clone.querySelector('.cfg_strategy_name').value = name;
+        clone.querySelector('.cfg_party_preference').value = preference;
+        clone.querySelector('.cfg_party_voter_count').value = voterCount;
+        clone.querySelector('.cfg_strategy_min_alignment').value = min;
+        clone.querySelector('.cfg_strategy_min_alignment_output').value = min;
+        clone.querySelector('.cfg_strategy_max_alignment').value = max;
+        clone.querySelector('.cfg_strategy_max_alignment_output').value = max;
+        cfg.appendChild(clone);
+    }
+
+    function addOffice(name) {
+        let cfg = document.querySelector('#cfg_offices');
+        let template = document.querySelector('#template_office');
+        let clone = template.content.cloneNode(true);
+        clone.querySelector('.cfg_office_name').value = name;
+        cfg.appendChild(clone);
+    }
+
+    function run() {
+        logElement.innerHTML = '';
+        let usa = new Country("United States of America")
+        document.getElementById("cfg_parties").querySelectorAll('div').forEach(function (e) {
+            let name = e.querySelector('.cfg_party_name').value;
+            let alignment = Number(e.querySelector('.cfg_party_alignment').value);
+            usa.setParty(new Party(name), alignment);
+        })
+        document.getElementById("cfg_offices").querySelectorAll('div').forEach(function (e) {
+            let name = e.querySelector('.cfg_office_name').value;
+            usa.setOffice(new Office(name));
+        })
+        document.getElementById("cfg_strategies").querySelectorAll('div').forEach(function (e) {
+            let name = e.querySelector('.cfg_strategy_name').value ;
+            let preference = e.querySelector('.cfg_party_preference').value;
+            let count = Number(e.querySelector('.cfg_party_voter_count').value);
+            let min = Number(e.querySelector('.cfg_strategy_min_alignment').value);
+            let max = Number(e.querySelector('.cfg_strategy_max_alignment').value);
+            usa.setVoterStrategy(new VotingStrategy(name, preference, min, max), count);
+        })
+        usa.setGamma(Number(document.getElementById('cfg_gamma').value));
+        usa.setLossAllowance(Number(document.getElementById('cfg_loss-allowance').value));
+        usa.run(Number(document.getElementById('cfg_iterations').value));
+        logElement.scrollTop = logElement.scrollHeight;
+    }
+
+    addParty("Democrats", 0.4);
+    addParty("Republicans", 0.6);
+    addOffice('Mayor');
+    addOffice('City Council At Large 1');
+    addOffice('City Council At Large 2');
+    addOffice('City Council At Large 3');
+    addOffice('City Council At Large 4');
+    addStrategy('Democrat Voter', 'Democrats', 0.0, 1.0, 10);
+    addStrategy('Left Voter', '', 0.0, 0.4, 10);
+    addStrategy('Center Voter', '', 0.3, 0.7, 10);
+    addStrategy('Right Voter', '', 0.6, 1.0, 10);
+    addStrategy('Republican Voter', 'Republicans', 0.0, 1.0, 10);
+</script>
+</body>
+</html>
